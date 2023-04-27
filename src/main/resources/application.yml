@@ -7,16 +7,3 @@ spring:
     username: root
     password: a123
     driver-class-name: com.mysql.cj.jdbc.Driver
-
-  cloud:
-    gateway:
-      discovery:
-        locator:
-          enabled: true
-      routes:
-        - id: static_route
-          uri: https://top.baidu.com
-          predicates:
-            - Path=/board
-    refresh:
-      interval: 5s
