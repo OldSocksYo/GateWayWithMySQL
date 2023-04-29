@@ -2,6 +2,7 @@ package com.example.gatewaywithmysql.entity;
 
 import lombok.Data;
 import lombok.experimental.Accessors;
+import org.springframework.cloud.gateway.route.RouteDefinition;
 
 import javax.persistence.Column;
 import javax.persistence.Entity;
@@ -40,7 +41,7 @@ public class GatewayRout {
     @Column(name = "meta_data")
     private String metadata;
 
-    @Column(name = "order")
+    @Column(name = "`order`")
     private Integer order;
 
     @Column(name = "is_delete")

@@ -2,28 +2,23 @@ package com.example.gatewaywithmysql.service;
 
 import com.example.gatewaywithmysql.dao.GatewayRouteRepository;
 import com.example.gatewaywithmysql.entity.GatewayRout;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.gatewaywithmysql.utils.ParseUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cloud.gateway.event.RefreshRoutesEvent;
-import org.springframework.cloud.gateway.filter.FilterDefinition;
-import org.springframework.cloud.gateway.handler.predicate.PredicateDefinition;
 import org.springframework.cloud.gateway.route.RouteDefinition;
-import org.springframework.cloud.gateway.route.RouteDefinitionRepository;
+import org.springframework.cloud.gateway.route.RouteDefinitionLocator;
 import org.springframework.cloud.gateway.support.NotFoundException;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
-import java.net.URI;
-import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.Objects;
+
+import static java.util.Collections.synchronizedMap;
 
 /**
  * @author : yong
@@ -33,131 +28,94 @@ import java.util.stream.Collectors;
 
 @Component
 @Slf4j
-public class JdbcRouteDefinitionRepository implements RouteDefinitionRepository {
+public class JdbcRouteDefinitionRepository implements RouteDefinitionLocator {
 
+    private final Map<String, RouteDefinition> routes = synchronizedMap(new LinkedHashMap<String, RouteDefinition>());
     private final GatewayRouteRepository gatewayRouteRepository;
+    private final ApplicationEventPublisher publisher;
 
-    public JdbcRouteDefinitionRepository(GatewayRouteRepository gatewayRouteRepository) {
+    private boolean firstStartFlag;
+
+    public JdbcRouteDefinitionRepository(GatewayRouteRepository gatewayRouteRepository,
+                                         ApplicationEventPublisher publisher) {
         this.gatewayRouteRepository = gatewayRouteRepository;
+        this.publisher = publisher;
     }
+
+
+    /**
+     * 发布RefreshRouteEvent会自动调用此方法
+     * @return 更新后的全量route信息
+     */
+    @Override
+    public Flux<RouteDefinition> getRouteDefinitions() {
+        // 第一次启动时需要先全量查一次数据库，后续操作此if中的逻辑不再执行
+        if (!firstStartFlag) {
+            List<GatewayRout> gatewayRouts = gatewayRouteRepository.findGatewayRoutsByIsDelete(0);
+            gatewayRouts.forEach(gatewayRout -> routes.put(gatewayRout.getRouteId()
+                    , ParseUtils.parseGatewayRout2RouteDefinition(gatewayRout)));
+            firstStartFlag = true;
+        }
+        return Flux.fromIterable(routes.values());
+    }
+
 
     /**
      * 一次性从数据库中获取全量route定义信息，全量更新
      */
-    @Override
-    public Flux<RouteDefinition> getRouteDefinitions() {
+    public String refreshAll() {
         List<GatewayRout> gatewayRouts = gatewayRouteRepository.findGatewayRoutsByIsDelete(0);
 
-        List<RouteDefinition> routeDefinitions = gatewayRouts
-                .stream()
-                .map(this::parseGatewayRout2RouteDefinition)
-                .collect(Collectors.toList());
+        gatewayRouts.forEach(gatewayRout -> routes.put(gatewayRout.getRouteId()
+                , ParseUtils.parseGatewayRout2RouteDefinition(gatewayRout)));
 
-        return Flux.fromIterable(routeDefinitions);
+        // 发布RefreshRoute事件
+        publisher.publishEvent(new RefreshRoutesEvent(this));
+        return "success";
     }
-
 
     /**
-     * 根据数据库中的gatewayRout信息封装RouteDefinition对象
-     * @param gatewayRout -
-     * @return -
+     * 单独增加一个Route
+     * @param routeId 数据库中配置好的route的routeId（调用前，先将route信息在数据库中配置好）
+     * @return success
      */
-    private RouteDefinition parseGatewayRout2RouteDefinition(GatewayRout gatewayRout) {
-        RouteDefinition routeDefinition = new RouteDefinition();
-        routeDefinition.setId(gatewayRout.getRouteId());
-        routeDefinition.setUri(URI.create(gatewayRout.getUri()));
-        routeDefinition.setOrder(gatewayRout.getOrder());
-
-        ObjectMapper objectMapper = new ObjectMapper();
-        List<PredicateDefinition> predicateDefinitions = new ArrayList<>();
-        if (StringUtils.hasText(gatewayRout.getPredicates())) {
-            try {
-                String[] predicates = gatewayRout.getPredicates().split(";;;");
-                for (String predicate : predicates) {
-                    predicateDefinitions.add(new PredicateDefinition(predicate));
-                }
-                //predicateDefinitions = objectMapper.readValue(gatewayRout.getPredicates(), new TypeReference<List<PredicateDefinition>>() {});
-            } catch (Exception e) {
-                log.error(e.getMessage());
-                throw new RuntimeException("could not handle predicate, e:" + e.getMessage());
-            }
+    public String addOneRoute(String routeId) {
+        GatewayRout gatewayRout = gatewayRouteRepository.findByRouteId(routeId);
+        if (Objects.isNull(gatewayRout)) {
+            throw new NotFoundException("未在数据库中找到对应的route配置");
         }
-        routeDefinition.setPredicates(predicateDefinitions);
+        gatewayRout.setIsDelete(0);
+        gatewayRouteRepository.save(gatewayRout);
 
-        List<FilterDefinition> filterDefinitions = new ArrayList<>();
-        if (StringUtils.hasText(gatewayRout.getFilters())) {
-            try {
-                String[] filters = gatewayRout.getFilters().split(";;;");
-                for (String filter : filters) {
-                    filterDefinitions.add(new FilterDefinition(filter));
-                }
-                //filterDefinitions = objectMapper.readValue(gatewayRout.getFilters(), new TypeReference<List<FilterDefinition>>() {});
-            } catch (Exception e) {
-                log.error(e.getMessage());
-                throw new RuntimeException("could not handle filter, e:" + e.getMessage());
-            }
-        }
-        routeDefinition.setFilters(filterDefinitions);
+        RouteDefinition routeDefinition = ParseUtils.parseGatewayRout2RouteDefinition(gatewayRout);
+        routes.put(gatewayRout.getRouteId(), routeDefinition);
 
-        Map<String, Object> metadata = new HashMap<>();
-        if (StringUtils.hasText(gatewayRout.getMetadata())) {
-            try {
-                metadata = objectMapper.readValue(gatewayRout.getMetadata(), new TypeReference<Map<String, Object>>() {});
-            } catch (JsonProcessingException e) {
-                log.error(e.getMessage());
-                throw new RuntimeException("could not parse metadata, e:" + e.getMessage());
-            }
-        }
-        routeDefinition.setMetadata(metadata);
-        return routeDefinition;
+        publisher.publishEvent(new RefreshRoutesEvent(this));
+        return "success";
     }
+
+    /**
+     * 根据routeId删除一个route
+     * @param routeId 数据库中配置的routeId
+     * @return success
+     */
+    public String deleteOneRoute(String routeId) {
+        GatewayRout gatewayRout = gatewayRouteRepository.findByRouteId(routeId);
+
+        if (!Objects.isNull(gatewayRout)) {
+            gatewayRout.setIsDelete(1);
+            gatewayRouteRepository.save(gatewayRout);
+        }
+        routes.remove(gatewayRout.getRouteId());
+
+        publisher.publishEvent(new RefreshRoutesEvent(this));
+        return "success";
+    }
+
+
 
     @EventListener
     public void refreshRoutesEvent(RefreshRoutesEvent event) {
         log.info("RefreshRoutesEvent 事件执行了，source为：" + event.getSource());
-
     }
-
-    /**
-     * 这里的实现方案是通过getRouteDefinitions一次性从数
-     * 据库中获取全量route定义信息，全量更新，所以save不实现
-     */
-    @Override
-    public Mono<Void> save(Mono<RouteDefinition> route) {
-        /*return route.flatMap(r -> {
-            GatewayRout gatewayRout = new GatewayRout();
-            gatewayRout.setRouteId(r.getId())
-                    .setUri(r.getUri().toString())
-                    .setOrder(r.getOrder())
-                    .setPredicates(parse2JsonStr(r.getPredicates()))
-                    .setFilters(parse2JsonStr(r.getFilters()))
-                    .setMetadata(parse2JsonStr(r.getMetadata()));
-            return Mono.fromCallable(() -> gatewayRouteRepository.save(gatewayRout)).then();
-        });*/
-        return Mono.defer(() -> Mono.error(new NotFoundException("Unsupported operation")));
-    }
-
-    /**
-     * 这里的实现方案是通过getRouteDefinitions一次性从数
-     * 据库中获取全量route定义信息，全量更新，所以delete不实现
-     */
-    @Override
-    public Mono<Void> delete(Mono<String> routeId) {
-       /*return routeId.flatMap(rd -> Mono.fromRunnable(() -> {
-           gatewayRouteRepository.delete(new GatewayRout().setRouteId(rd));
-       }).then());*/
-        return Mono.defer(() -> Mono.error(new NotFoundException("Unsupported operation")));
-    }
-
-    /*private String parse2JsonStr(Object obj) {
-        String json = null;
-        try {
-            ObjectMapper objectMapper = new ObjectMapper();
-            json = objectMapper.writeValueAsString(obj);
-        } catch (JsonProcessingException e) {
-            log.error(e.getMessage());
-            throw new RuntimeException("parse obj to str failed, e=" + e.getMessage());
-        }
-        return json;
-    }*/
 }

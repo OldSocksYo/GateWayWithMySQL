@@ -14,5 +14,7 @@ import java.util.List;
 
 @Repository
 public interface GatewayRouteRepository extends JpaRepository<GatewayRout, Long> {
-    public List<GatewayRout> findGatewayRoutsByIsDelete(Integer isDelete);
+    List<GatewayRout> findGatewayRoutsByIsDelete(Integer isDelete);
+    GatewayRout findByRouteIdAndIsDelete(String routeId, Integer isDelete);
+    GatewayRout findByRouteId(String routeId);
 }
